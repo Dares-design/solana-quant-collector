@@ -1,6 +1,7 @@
 import logging
 import aiosqlite
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any
 from config.settings import settings
@@ -19,6 +20,12 @@ class DatabaseWriter:
 
     async def initialize(self):
         """Inicijalizuje bazu podataka i kreira tabelu ako ne postoji."""
+        # --- OVA LINIJA OSIGURAVA DA FOLDER POSTOJI ---
+        folder = os.path.dirname(self.db_path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        # ----------------------------------------------
+
         async with aiosqlite.connect(self.db_path) as db:
             # WAL mod za bolje performanse i istovremeni pristup
             await db.execute("PRAGMA journal_mode=WAL;")
