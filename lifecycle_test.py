@@ -3,7 +3,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 
-# Putanja do tvog .db fajla (promeni ime ako je potrebno)
 DB_PATH = 'solana_test.db' 
 
 def analyze_token_lifecycle(db_path):
@@ -12,50 +11,58 @@ def analyze_token_lifecycle(db_path):
         return
 
     conn = sqlite3.connect(db_path)
-    
-    # Uzimamo sve podatke iz baze
-    query = "SELECT timestamp, symbol, price_usd, liquidity_usd, volume_h24 FROM token_snapshots"
+    query = "SELECT * FROM token_snapshots"
     df = pd.read_sql_query(query, conn)
     conn.close()
 
-    # Pretvaramo vreme u pravi format
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
-    # Grupišemo po tokenu i brojimo koliko puta je viđen
     token_counts = df['symbol'].value_counts()
     
     print("\n--- TOP 5 TOKENA KOJE JE BOT NAJDUŽE PRATIO ---")
     print(token_counts.head(5))
     
-    # Uzimamo token koji je najduže praćen (osim ako je None)
     target_symbol = token_counts.index[0]
     print(f"\n🔍 Analiziram životni vek tokena: {target_symbol}")
     
-    # Filtriramo samo taj token
-    token_df = df[df['symbol'] == target_symbol].sort_values('timestamp')
+    token_df = df[df['symbol'] == target_symbol].sort_values('timestamp').copy()
     
-    print(f"Prvi put viđen: {token_df['timestamp'].iloc[0]}")
-    print(f"Poslednji put viđen: {token_df['timestamp'].iloc[-1]}")
     print(f"Broj snapshota (koliko minuta je praćen): {len(token_df)}")
     
-    print(f"Početna cena: ${token_df['price_usd'].iloc[0]}")
-    print(f"Krajnja cena: ${token_df['price_usd'].iloc[-1]}")
+    # Provera da li V2 kolone postoje
+    has_v2_data = 'buys_m5' in token_df.columns and token_df['buys_m5'].notna().any()
     
-    # Crtamo grafikone
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    if has_v2_data:
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
-    # Grafik cene
+    # 1. Grafik cene
     ax1.plot(token_df['timestamp'], token_df['price_usd'], color='green', marker='o', markersize=2)
     ax1.set_title(f'Kretanje cene: {target_symbol}')
     ax1.set_ylabel('Cena (USD)')
     ax1.grid(True, alpha=0.3)
     
-    # Grafik likvidnosti
+    # 2. Grafik likvidnosti
     ax2.plot(token_df['timestamp'], token_df['liquidity_usd'], color='blue', marker='o', markersize=2)
     ax2.set_title('Kretanje likvidnosti')
     ax2.set_ylabel('Likvidnost (USD)')
-    ax2.set_xlabel('Vreme')
     ax2.grid(True, alpha=0.3)
+    
+    # 3. Grafik Buy/Sell pritiska (ako imamo V2 podatke)
+    if has_v2_data:
+        token_df['buys_m5'] = token_df['buys_m5'].fillna(0)
+        token_df['sells_m5'] = token_df['sells_m5'].fillna(0)
+        
+        ax3.bar(token_df['timestamp'], token_df['buys_m5'], color='green', alpha=0.6, label='Kupovine (M5)')
+        ax3.bar(token_df['timestamp'], -token_df['sells_m5'], color='red', alpha=0.6, label='Prodaje (M5)')
+        ax3.set_title('Pritisak kupaca (zeleno) vs prodavaca (crveno)')
+        ax3.set_ylabel('Broj transakcija')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        ax3.set_xlabel('Vreme')
+    else:
+        print("\n⚠️ Nema V2 podataka (buys_m5/sells_m5) u ovom fajlu. Učitaj noviji .db fajl.")
+        ax2.set_xlabel('Vreme')
     
     plt.tight_layout()
     plt.show()
