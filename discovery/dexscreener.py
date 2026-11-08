@@ -1,16 +1,12 @@
 import logging
 import aiohttp
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Set
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
 class DexScreenerDiscovery:
-    """
-    Napredni modul zadužen za pronalaženje kvalitetnijih Solana tokena 
-    kroz DexScreener Boosts i Community Takeovers endpointe, sa batch obogaćivanjem.
-    """
-
     @staticmethod
     @retry(
         stop=stop_after_attempt(3),
@@ -19,57 +15,35 @@ class DexScreenerDiscovery:
         reraise=True
     )
     async def _fetch_json(session: aiohttp.ClientSession, url: str) -> Any:
-        """Pomoćna metoda za mrežne pozive sa ugrađenim retry mehanizmom."""
         async with session.get(url, timeout=10) as response:
             if response.status != 200:
-                logger.warning(f"DexScreener API vratio statusni kod {response.status} za URL: {url}")
+                logger.warning(f"DexScreener API status {response.status} za URL: {url}")
                 response.raise_for_status()
             return await response.json()
 
     @classmethod
     async def fetch_latest_solana_pairs(cls, session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
-        """
-        Dohvata tokene preko /token-boosts/latest/v1 i /community-takeovers/latest/v1,
-        filtrira Solana mrežu, a zatim povlači detaljne podatke u batch-evima preko /tokens/v1/solana/{addresses}.
-        """
         boosts_url = "https://api.dexscreener.com/token-boosts/latest/v1"
         takeovers_url = "https://api.dexscreener.com/community-takeovers/latest/v1"
 
         mint_addresses: Set[str] = set()
 
-        # 1. Prikupljanje boost-ovanih tokena
-        try:
-            boosts_data = await cls._fetch_json(session, boosts_url)
-            if isinstance(boosts_data, list):
-                for item in boosts_data:
-                    chain = item.get("chainId") or item.get("chain")
-                    if chain == "solana":
-                        address = item.get("tokenAddress") or item.get("address")
-                        if address:
-                            mint_addresses.add(address)
-        except Exception as e:
-            logger.error(f"Greška pri dohvatanju token-boosts: {e}")
-
-        # 2. Prikupljanje community-takeover tokena
-        try:
-            takeovers_data = await cls._fetch_json(session, takeovers_url)
-            if isinstance(takeovers_data, list):
-                for item in takeovers_data:
-                    chain = item.get("chainId") or item.get("chain")
-                    if chain == "solana":
-                        address = item.get("tokenAddress") or item.get("address")
-                        if address:
-                            mint_addresses.add(address)
-        except Exception as e:
-            logger.error(f"Greška pri dohvatanju community-takeovers: {e}")
+        for url in [boosts_url, takeovers_url]:
+            try:
+                data = await cls._fetch_json(session, url)
+                if isinstance(data, list):
+                    for item in data:
+                        chain = item.get("chainId") or item.get("chain")
+                        if chain == "solana":
+                            address = item.get("tokenAddress") or item.get("address")
+                            if address:
+                                mint_addresses.add(address)
+            except Exception as e:
+                logger.error(f"Greška pri dohvatanju sa {url}: {e}")
 
         if not mint_addresses:
-            logger.info("Nisu pronađeni novi Solana tokeni kroz Boosts/Takeovers endpointe u ovom ciklusu.")
             return []
 
-        logger.info(f"Pronađeno {len(mint_addresses)} jedinstvenih Solana mint adresa iz Boosts/Takeovers. Dohvatanje detalja...")
-
-        # 3. Batch obogaćivanje podataka preko /tokens/v1/solana/{addresses} (do 30 adresa po zahtevu)
         mints_list = list(mint_addresses)
         chunk_size = 30
         solana_pairs = []
@@ -89,6 +63,17 @@ class DexScreenerDiscovery:
                             pair_address = pair.get("pairAddress")
 
                             if mint and pair_address:
+                                # Ekstrakcija novih polja po ChatGPT-jevom predlogu
+                                txns = pair.get("txns") or {}
+                                m5_txns = txns.get("m5") or {}
+                                volume = pair.get("volume") or {}
+                                price_change = pair.get("priceChange") or {}
+                                
+                                # Normalizacija timestampa (ms u sekunde)
+                                created_at = pair.get("pairCreatedAt")
+                                if created_at and created_at > 10**12:
+                                    created_at = created_at // 1000
+
                                 solana_pairs.append({
                                     "mint": mint,
                                     "pair_address": pair_address,
@@ -97,11 +82,22 @@ class DexScreenerDiscovery:
                                     "dex": pair.get("dexId"),
                                     "price_native": pair.get("priceNative"),
                                     "price_usd": pair.get("priceUsd"),
-                                    "liquidity_usd": pair.get("liquidity", {}).get("usd"),
-                                    "volume_h24": pair.get("volume", {}).get("h24")
+                                    "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+                                    "volume_h24": volume.get("h24"),
+                                    
+                                    # NOVA POLJA
+                                    "buys_m5": m5_txns.get("buys"),
+                                    "sells_m5": m5_txns.get("sells"),
+                                    "volume_m5": volume.get("m5"),
+                                    "volume_h1": volume.get("h1"),
+                                    "fdv": pair.get("fdv"),
+                                    "market_cap": pair.get("marketCap"),
+                                    "price_change_m5": price_change.get("m5"),
+                                    "pair_created_at": created_at,
+                                    
+                                    "discovery_source": "boosts/takeovers"
                                 })
             except Exception as e:
-                logger.error(f"Greška pri batch dohvatanju detalja tokena za chunk: {e}")
+                logger.error(f"Greška pri batch dohvatanju detalja: {e}")
 
-        logger.info(f"Uspešno formatirano {len(solana_pairs)} Solana parova iz naprednih endpointa.")
         return solana_pairs
